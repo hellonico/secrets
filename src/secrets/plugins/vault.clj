@@ -253,3 +253,57 @@
             acc)))
       {}
       secret-names))))
+
+;; ---------- Plugin Integration for secrets.core
+
+(defn get-secret
+  "Get a secret from Vault for use with secrets.core plugin system.
+   
+   Reads from VAULT_PATH (or defaults to 'secrets') and uses ENV_NAME
+   for environment-aware path resolution.
+   
+   Environment variables:
+   - VAULT_ADDR: Vault server address (required)
+   - VAULT_TOKEN: Vault authentication token (required)
+   - VAULT_MOUNT: KV mount point (default: 'kv')
+   - VAULT_PATH: Base path for secrets (default: 'secrets')
+   - ENV_NAME: Environment name for path prefixing"
+  [k-or-path]
+  (let [config (vault-config)
+        mount (or (System/getenv "VAULT_MOUNT") "kv")
+        base-path (or (System/getenv "VAULT_PATH") "secrets")]
+    (try
+      (let [secrets (read-secret config mount base-path)]
+        (if (vector? k-or-path)
+          (get-in secrets k-or-path)
+          (get secrets k-or-path)))
+      (catch Exception _
+        nil))))
+
+(defn all-secrets
+  "Get all secrets from Vault for use with secrets.core plugin system."
+  []
+  (let [config (vault-config)
+        mount (or (System/getenv "VAULT_MOUNT") "kv")
+        base-path (or (System/getenv "VAULT_PATH") "secrets")]
+    (try
+      (read-secret config mount base-path)
+      (catch Exception _
+        {}))))
+
+(defn reload!
+  "Reload secrets from Vault."
+  []
+  (all-secrets))
+
+(defn make-plugin
+  "Create a Vault plugin for secrets.core."
+  []
+  {:name :vault
+   :description (str "Vault secrets from " 
+                     (or (System/getenv "VAULT_PATH") "secrets")
+                     (when-let [env (get-env-name)]
+                       (str " (env: " env ")")))
+   :get-fn get-secret
+   :reload-fn reload!
+   :all-fn all-secrets})
