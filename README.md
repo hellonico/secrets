@@ -268,6 +268,7 @@ Copyright © 2026
 ## Documentation
 
 - [ENV_BASED_SECRETS.md](ENV_BASED_SECRETS.md) - Environment-based secret management guide
+- [VAULT_DOCKER_SETUP.md](VAULT_DOCKER_SETUP.md) - Vault Docker setup with persistent storage
 - [PLUGIN_ARCHITECTURE.md](PLUGIN_ARCHITECTURE.md) - Plugin system architecture and custom plugin guide
 - [VAULT_PLUGIN.md](VAULT_PLUGIN.md) - Vault plugin documentation
 - [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) - Implementation details

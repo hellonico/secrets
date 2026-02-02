@@ -29,6 +29,7 @@ pom.xml.asc
 secrets.edn
 secrets.*.edn
 secrets.*.edn.enc
+.vault-keys
 alan.md
 docs
 /pyjamamazing
