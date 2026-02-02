@@ -3,7 +3,8 @@
    
    Manages multiple secret plugins and provides a unified lookup interface.
    Plugins are checked in priority order until a secret is found."
-  (:require [secrets.plugins.files :as files-plugin]))
+  (:require [secrets.plugins.files :as files-plugin]
+            [clojure.string]))
 
 ;; ---------- Plugin Registry
 
@@ -131,3 +132,93 @@
    For backwards compatibility."
   [path m]
   (files-plugin/write-encrypted-secrets! path m))
+
+;; ---------- Convenience Utilities
+
+(defn- key->env-name
+  "Convert a secret key to its conventional environment variable name.
+   :google-api-key => \"GOOGLE_API_KEY\"
+   [:brave :api-key] => \"BRAVE_API_KEY\""
+  [k]
+  (-> (if (keyword? k) (name k) (clojure.string/join "-" (map name k)))
+      (clojure.string/upper-case)
+      (clojure.string/replace "-" "_")))
+
+(defn- key->display-name
+  "Convert a secret key to a human-readable display name.
+   :google-api-key => \"Google API Key\"
+   [:brave :api-key] => \"Brave API Key\""
+  [k]
+  (-> (if (keyword? k) (name k) (clojure.string/join "-" (map name k)))
+      (clojure.string/replace "-" " ")
+      (clojure.string/split #"\s+")
+      (->> (map clojure.string/capitalize)
+           (clojure.string/join " "))))
+
+(defn get-secret-or-env
+  "Get a secret with fallback to an environment variable.
+   
+   Automatically derives the env var name from the secret key:
+   :google-api-key => GOOGLE_API_KEY
+   [:brave :api :key] => BRAVE_API_KEY
+   
+   This is useful for API keys that might be in secrets.edn OR a direct env var.
+   
+   Parameters:
+   - secret-key: Keyword or path vector for the secret (e.g., :google-api-key)
+   
+   Examples:
+   (get-secret-or-env :google-api-key)
+   ;; Checks: secrets.edn first, then GOOGLE_API_KEY env var
+   
+   (get-secret-or-env [:brave :api-key])
+   ;; Checks: secrets.edn first, then BRAVE_API_KEY env var"
+  [secret-key]
+  (or (get-secret secret-key)
+      (System/getenv (key->env-name secret-key))))
+
+(defn require-secret!
+  "Get a secret with env var fallback, or print helpful error and return nil.
+   
+   Automatically derives both the env var name and display name from the key.
+   
+   Parameters:
+   - secret-key: Keyword or path for the secret (e.g., :google-api-key)
+   
+   Example:
+   (require-secret! :google-api-key)
+   ;; If not found, prints:
+   ;;   ⚠️  Google API Key not found!
+   ;;      Please add :google-api-key to your secrets.edn
+   ;;      OR set GOOGLE_API_KEY environment variable.
+   ;; If found, returns the secret value"
+  [secret-key]
+  (let [value (get-secret-or-env secret-key)]
+    (when-not value
+      (let [display-name (key->display-name secret-key)
+            env-name (key->env-name secret-key)]
+        (println (str "⚠️  " display-name " not found!"))
+        (println (str "   Please add " secret-key " to your secrets.edn"))
+        (println (str "   OR set " env-name " environment variable."))))
+    value))
+
+(defn require-secret!!
+  "Get a secret with env var fallback, or throw an exception.
+   
+   Like require-secret! but throws instead of returning nil.
+   Automatically derives both the env var name and display name from the key.
+   
+   Parameters:
+   - secret-key: Keyword or path for the secret (e.g., :google-api-key)
+   
+   Example:
+   (require-secret!! :google-api-key)
+   ;; If not found, prints helpful message AND throws exception
+   ;; If found, returns the secret value"
+  [secret-key]
+  (let [value (require-secret! secret-key)]
+    (when-not value
+      (throw (ex-info (str (key->display-name secret-key) " is required")
+                      {:secret-key secret-key
+                       :env-var (key->env-name secret-key)})))
+    value))
