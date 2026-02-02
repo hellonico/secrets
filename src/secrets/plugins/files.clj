@@ -106,19 +106,42 @@
 
 (defn- home [rel] (str (System/getProperty "user.home") "/" rel))
 
+(defn- get-env-name
+  "Get the current environment name from ENV_NAME environment variable.
+   Returns nil if not set."
+  []
+  (let [env-name (System/getenv "ENV_NAME")]
+    (when-not (str/blank? env-name)
+      env-name)))
+
 (defn- env->secrets-map
   "Only consumes env vars prefixed with SECRET__.
-   Example: SECRET__BRAVE__API_KEY -> [:brave :api-key]"
+   Example: SECRET__BRAVE__API_KEY -> [:brave :api-key]
+   
+   If ENV_NAME is set, also checks for environment-specific variables:
+   - ENV_NAME=staging, SECRET_STAGING__BRAVE__API_KEY -> [:brave :api-key]"
   []
-  (let [env (System/getenv)]
+  (let [env (System/getenv)
+        env-name (get-env-name)
+        env-prefix (when env-name (str "SECRET_" (str/upper-case env-name) "__"))]
     (reduce-kv
      (fn [m k v]
-       (if (str/starts-with? k "SECRET__")
+       (cond
+         ;; Environment-specific prefix (e.g., SECRET_STAGING__)
+         (and env-prefix (str/starts-with? k env-prefix))
+         (let [ks (->> (str/split (subs k (count env-prefix)) #"__")
+                       (map #(-> % str/lower-case (str/replace "_" "-") keyword))
+                       vec)]
+           (assoc-in m ks v))
+
+         ;; Generic SECRET__ prefix
+         (str/starts-with? k "SECRET__")
          (let [ks (->> (str/split (subs k (count "SECRET__")) #"__")
                        (map #(-> % str/lower-case (str/replace "_" "-") keyword))
                        vec)]
            (assoc-in m ks v))
-         m))
+
+         :else m))
      {} env)))
 
 (defn- maybe-read-encrypted [path]
@@ -127,13 +150,23 @@
       (read-encrypted-edn path pp))))
 
 (defn- load-all-sources []
-  (let [local-plain (load-edn-file "secrets.edn")
+  (let [env-name (get-env-name)
+        ;; Default files
+        local-plain (load-edn-file "secrets.edn")
         local-enc (maybe-read-encrypted "secrets.edn.enc")
         home-plain (load-edn-file (home "secrets.edn"))
         home-enc (maybe-read-encrypted (home "secrets.edn.enc"))
+        ;; Environment-specific files (e.g., secrets.staging.edn)
+        env-local-plain (when env-name (load-edn-file (str "secrets." env-name ".edn")))
+        env-local-enc (when env-name (maybe-read-encrypted (str "secrets." env-name ".edn.enc")))
+        env-home-plain (when env-name (load-edn-file (home (str "secrets." env-name ".edn"))))
+        env-home-enc (when env-name (maybe-read-encrypted (home (str "secrets." env-name ".edn.enc"))))
         env-map (env->secrets-map)]
-    ;; Priority: home → local → env (env wins overall)
-    (deep-merge home-plain home-enc local-plain local-enc env-map)))
+    ;; Priority: home default → home env-specific → local default → local env-specific → env vars
+    ;; This allows environment-specific files to override defaults
+    (deep-merge home-plain home-enc env-home-plain env-home-enc
+                local-plain local-enc env-local-plain env-local-enc
+                env-map)))
 
 ;; ---------- Plugin state
 

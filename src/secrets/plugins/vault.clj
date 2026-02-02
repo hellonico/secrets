@@ -37,6 +37,27 @@
 
 ;; ---------- Vault configuration
 
+(defn- get-env-name
+  "Get the current environment name from ENV_NAME environment variable.
+   Returns nil if not set."
+  []
+  (let [env-name (System/getenv "ENV_NAME")]
+    (when-not (str/blank? env-name)
+      env-name)))
+
+(defn- env-aware-path
+  "Prepend environment name to path if ENV_NAME is set.
+   
+   Examples:
+   - ENV_NAME=staging, path='myapp/config' => 'staging/myapp/config'
+   - ENV_NAME not set, path='myapp/config' => 'myapp/config'"
+  [path]
+  (if-let [env-name (get-env-name)]
+    (if (str/blank? path)
+      env-name
+      (str env-name "/" path))
+    path))
+
 (defn vault-config
   "Returns Vault configuration from environment or explicit params.
    
@@ -45,13 +66,16 @@
    - VAULT_TOKEN: Authentication token
    
    Optional env vars:
-   - VAULT_NAMESPACE: Namespace (for Vault Enterprise)"
+   - VAULT_NAMESPACE: Namespace (for Vault Enterprise)
+   - ENV_NAME: Environment name (e.g., 'staging', 'production')
+                When set, all paths are automatically prefixed with the environment name"
   ([]
    (vault-config {}))
   ([{:keys [addr token namespace]}]
    {:addr (or addr (System/getenv "VAULT_ADDR"))
     :token (or token (System/getenv "VAULT_TOKEN"))
-    :namespace (or namespace (System/getenv "VAULT_NAMESPACE"))}))
+    :namespace (or namespace (System/getenv "VAULT_NAMESPACE"))
+    :env-name (get-env-name)}))
 
 (defn validate-config!
   "Validates Vault configuration. Throws if required fields are missing."
@@ -82,8 +106,10 @@
   ([config mount path]
    (validate-config! config)
    (let [{:keys [addr token namespace]} config
+         ;; Apply environment-aware path transformation
+         effective-path (env-aware-path path)
          ;; KV v2 format: /v1/{mount}/data/{path}
-         url (str addr "/v1/" mount "/data/" path)
+         url (str addr "/v1/" mount "/data/" effective-path)
          headers (cond-> {"X-Vault-Token" token}
                    (not (str/blank? namespace))
                    (assoc "X-Vault-Namespace" namespace))]
@@ -116,7 +142,9 @@
   ([config mount path data]
    (validate-config! config)
    (let [{:keys [addr token namespace]} config
-         url (str addr "/v1/" mount "/data/" path)
+         ;; Apply environment-aware path transformation
+         effective-path (env-aware-path path)
+         url (str addr "/v1/" mount "/data/" effective-path)
          headers (cond-> {"X-Vault-Token" token}
                    (not (str/blank? namespace))
                    (assoc "X-Vault-Namespace" namespace))
@@ -165,8 +193,10 @@
   ([config mount path]
    (validate-config! config)
    (let [{:keys [addr token namespace]} config
+         ;; Apply environment-aware path transformation
+         effective-path (env-aware-path path)
          ;; KV v2 list format: /v1/{mount}/metadata/{path}?list=true
-         base-path (if (str/blank? path) "" (str path "/"))
+         base-path (if (str/blank? effective-path) "" (str effective-path "/"))
          url (str addr "/v1/" mount "/metadata/" base-path "?list=true")
          headers (cond-> {"X-Vault-Token" token}
                    (not (str/blank? namespace))

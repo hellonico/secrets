@@ -72,6 +72,72 @@ export SECRET__OPENAI__API_KEY="sk-..."
 # Maps to [:openai :api-key]
 ```
 
+### Environment-Based Secrets
+
+The library supports environment-specific secret management via the `ENV_NAME` environment variable. When set, the library automatically:
+
+1. **Loads environment-specific files** (e.g., `secrets.staging.edn`)
+2. **Uses environment-specific Vault paths** (e.g., `pyjama/staging`)
+3. **Checks environment-specific env variables** (e.g., `SECRET_STAGING__*`)
+
+#### Setting Up Environments
+
+```bash
+# Set the environment name
+export ENV_NAME=staging
+
+# Now the library will look for:
+# - Files: secrets.staging.edn, secrets.staging.edn.enc
+# - Vault: pyjama/staging/* (instead of pyjama/*)
+# - Env vars: SECRET_STAGING__* (in addition to SECRET__*)
+```
+
+#### File Priority with Environments
+
+When `ENV_NAME=staging`, the priority order becomes:
+
+1. `~/secrets.edn` (home default)
+2. `~/secrets.edn.enc` (home default encrypted)
+3. `~/secrets.staging.edn` (home environment-specific)
+4. `~/secrets.staging.edn.enc` (home environment-specific encrypted)
+5. `./secrets.edn` (local default)
+6. `./secrets.edn.enc` (local default encrypted)
+7. `./secrets.staging.edn` (local environment-specific)
+8. `./secrets.staging.edn.enc` (local environment-specific encrypted)
+9. `SECRET__*` environment variables (generic)
+10. `SECRET_STAGING__*` environment variables (environment-specific, highest priority)
+
+This allows you to:
+- Keep common secrets in `secrets.edn`
+- Override with environment-specific values in `secrets.staging.edn`
+- Further override with environment variables
+
+#### Vault Paths with Environments
+
+When `ENV_NAME=staging`:
+
+```clojure
+;; Without ENV_NAME:
+(vault/read-secret config "secret" "pyjama/database")
+;; Reads from: secret/data/pyjama/database
+
+;; With ENV_NAME=staging:
+(vault/read-secret config "secret" "pyjama/database")
+;; Reads from: secret/data/staging/pyjama/database
+```
+
+#### Environment Variables with Environments
+
+```bash
+# Generic (works in all environments)
+export SECRET__API_KEY="default-key"
+
+# Environment-specific (only used when ENV_NAME=staging)
+export SECRET_STAGING__API_KEY="staging-key"
+
+# When ENV_NAME=staging, SECRET_STAGING__API_KEY takes precedence
+```
+
 ### Encrypted Secrets
 
 ```clojure
@@ -146,10 +212,15 @@ clojure -M:test -n secrets.plugins.vault-test
 See the `src/secrets/examples/` directory for examples:
 
 - `vault_demo.clj`: Comprehensive Vault plugin demonstration
+- `env_demo.clj`: Environment-based secret management demonstration
 
 Run examples:
 ```bash
+# Vault plugin demo
 clojure -M -m secrets.examples.vault-demo
+
+# Environment-based secrets demo
+clojure -M:env-demo
 ```
 
 ## Security Considerations
@@ -196,6 +267,7 @@ Copyright © 2026
 
 ## Documentation
 
+- [ENV_BASED_SECRETS.md](ENV_BASED_SECRETS.md) - Environment-based secret management guide
 - [PLUGIN_ARCHITECTURE.md](PLUGIN_ARCHITECTURE.md) - Plugin system architecture and custom plugin guide
 - [VAULT_PLUGIN.md](VAULT_PLUGIN.md) - Vault plugin documentation
 - [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) - Implementation details

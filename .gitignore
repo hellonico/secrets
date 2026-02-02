@@ -27,6 +27,8 @@ pom.xml.asc
 /.idea/
 /docs/generated.md
 secrets.edn
+secrets.*.edn
+secrets.*.edn.enc
 alan.md
 docs
 /pyjamamazing
