@@ -1,152 +1,133 @@
 (ns secrets.core
- (:require [clojure.edn :as edn]
-           [clojure.java.io :as io]
-           [clojure.string :as str])
- (:import [java.io PushbackReader ByteArrayOutputStream]
-          [java.security SecureRandom]
-          [javax.crypto Cipher SecretKeyFactory]
-          [javax.crypto.spec PBEKeySpec SecretKeySpec GCMParameterSpec]))
+  "Plugin-based secrets management core.
+   
+   Manages multiple secret plugins and provides a unified lookup interface.
+   Plugins are checked in priority order until a secret is found."
+  (:require [secrets.plugins.files :as files-plugin]))
 
-;; ---------- utils
+;; ---------- Plugin Registry
 
-(defn- load-edn-file [path]
- (let [f (io/file path)]
-  (when (.exists f)
-   (with-open [r (PushbackReader. (io/reader f))]
-    (edn/read r)))))
+(def ^:private plugins
+  "Registry of secret plugins.
+   Each plugin must implement: (get-secret plugin-instance key-or-path)
+   Plugins are checked in order; first non-nil result wins."
+  (atom []))
 
-(defn- env-name [k]
- (-> (if (keyword? k) (name k) (str/join "-" (map name k)))
-     (str/upper-case)
-     (str/replace "-" "_")))
+(def ^:private default-plugins
+  "Default plugins loaded on initialization."
+  [{:name :files
+    :description "File and environment-based secrets"
+    :get-fn files-plugin/get-secret
+    :reload-fn files-plugin/reload!
+    :all-fn files-plugin/all-secrets}])
 
-(defn- deep-merge
- "Rightmost wins; maps merge recursively."
- [& ms]
- (letfn [(m2 [a b]
-          (merge-with
-           (fn [x y]
-            (if (and (map? x) (map? y))
-             (m2 x y)
-             y))
-           a b))]
-  (reduce m2 {} ms)))
+;; ---------- Plugin Management
 
-;; ---------- encryption (AES-GCM + PBKDF2)
+(defn register-plugin!
+  "Register a secret plugin.
+   
+   Plugin map should contain:
+   - :name        - Unique keyword identifier
+   - :description - Human-readable description
+   - :get-fn      - Function (fn [key-or-path] => value or nil)
+   - :reload-fn   - Optional function (fn [] => reloaded-data)
+   - :all-fn      - Optional function (fn [] => all-secrets-map)
+   
+   Plugins are checked in registration order."
+  [plugin]
+  (when-not (:name plugin)
+    (throw (ex-info "Plugin must have a :name" {:plugin plugin})))
+  (when-not (:get-fn plugin)
+    (throw (ex-info "Plugin must have a :get-fn" {:plugin plugin})))
+  (swap! plugins conj plugin)
+  plugin)
 
-(def ^:private ^:const salt-bytes 16)
-(def ^:private ^:const iv-bytes 12)
-(def ^:private ^:const tag-bits 128)
-(def ^:private ^:const iters 100000)
-(def ^:private ^:const key-bits 256)
+(defn unregister-plugin!
+  "Remove a plugin by name."
+  [plugin-name]
+  (swap! plugins (fn [ps] (remove #(= (:name %) plugin-name) ps)))
+  nil)
 
-(defn- pbkdf2-key [pass salt]
- (let [skf (SecretKeyFactory/getInstance "PBKDF2WithHmacSHA256")
-       spec (PBEKeySpec. (.toCharArray pass) salt iters key-bits)
-       bytes (.getEncoded (.generateSecret skf spec))]
-  (SecretKeySpec. bytes "AES")))
+(defn list-plugins
+  "List all registered plugins."
+  []
+  @plugins)
 
-(defn- encrypt-bytes [pass plaintext-bytes]
- (let [rng (SecureRandom.)
-       salt (byte-array salt-bytes)
-       iv (byte-array iv-bytes)
-       _ (.nextBytes rng salt)
-       _ (.nextBytes rng iv)
-       key (pbkdf2-key pass salt)
-       c (doto (Cipher/getInstance "AES/GCM/NoPadding")
-          (.init Cipher/ENCRYPT_MODE key (GCMParameterSpec. tag-bits iv)))
-       ct (.doFinal c plaintext-bytes)]
-  ;; file = SALT || IV || CIPHERTEXT
-  (-> (doto (ByteArrayOutputStream.)
-       (.write salt)
-       (.write iv)
-       (.write ct))
-      (.toByteArray))))
+(defn get-plugin
+  "Get a plugin by name."
+  [plugin-name]
+  (first (filter #(= (:name %) plugin-name) @plugins)))
 
-(defn- decrypt-bytes [pass all]
- (let [salt (java.util.Arrays/copyOfRange all 0 salt-bytes)
-       iv (java.util.Arrays/copyOfRange all salt-bytes (+ salt-bytes iv-bytes))
-       ct (java.util.Arrays/copyOfRange all (+ salt-bytes iv-bytes) (alength all))
-       key (pbkdf2-key pass salt)
-       c (doto (Cipher/getInstance "AES/GCM/NoPadding")
-          (.init Cipher/DECRYPT_MODE key (GCMParameterSpec. tag-bits iv)))]
-  (.doFinal c ct)))
+;; ---------- Initialization
 
-(defn- read-encrypted-edn [path pass]
- (let [f (io/file path)]
-  (when (.exists f)
-   (let [bytes (with-open [in (io/input-stream f)]
-                (.readAllBytes in))
-         plain (String. ^bytes (decrypt-bytes pass bytes) "UTF-8")]
-    (edn/read-string plain)))))
+(defn init-default-plugins!
+  "Initialize default plugins (files and environment).
+   This is called automatically on namespace load."
+  []
+  (reset! plugins [])
+  (doseq [plugin default-plugins]
+    (register-plugin! plugin))
+  @plugins)
 
-(defn write-encrypted-secrets!
- "Write EDN map `m` to `path` (e.g. \"~/secrets.edn.enc\") encrypted with SECRETS_PASSPHRASE."
- [path m]
- (let [pp (System/getenv "SECRETS_PASSPHRASE")]
-  (when (or (nil? pp) (str/blank? pp))
-   (throw (ex-info "SECRETS_PASSPHRASE is not set" {})))
-  (let [edn-text (pr-str m)
-        bytes (encrypt-bytes pp (.getBytes edn-text "UTF-8"))
-        f (io/file (or (some-> path io/file .getPath) path))]
-   (when-let [p (.getParentFile f)] (.mkdirs p))
-   (with-open [out (io/output-stream f)]
-    (.write out bytes))
-   path)))
+;; Initialize on load
+(init-default-plugins!)
 
-;; ---------- sources
-
-(defn- home [rel] (str (System/getProperty "user.home") "/" rel))
-
-(defn- env->secrets-map
- "Only consumes env vars prefixed with SECRET__.
-  Example: SECRET__BRAVE__API_KEY -> [:brave :api-key]"
- []
- (let [env (System/getenv)]
-  (reduce-kv
-   (fn [m k v]
-    (if (str/starts-with? k "SECRET__")
-     (let [ks (->> (str/split (subs k (count "SECRET__")) #"__")
-                   (map #(-> % str/lower-case (str/replace "_" "-") keyword))
-                   vec)]
-      (assoc-in m ks v))
-     m))
-   {} env)))
-
-(defn- maybe-read-encrypted [path]
- (let [pp (System/getenv "SECRETS_PASSPHRASE")]
-  (when (and (not (str/blank? pp)) (.exists (io/file path)))
-   (read-encrypted-edn path pp))))
-
-(defn- load-all-sources []
- (let [local-plain (load-edn-file "secrets.edn")
-       local-enc (maybe-read-encrypted "secrets.edn.enc")
-       home-plain (load-edn-file (home "secrets.edn"))
-       home-enc (maybe-read-encrypted (home "secrets.edn.enc"))
-       env-map (env->secrets-map)]
-  ;; Priority: home → local → env (env wins overall)
-  (deep-merge home-plain home-enc local-plain local-enc env-map)))
-
-(def ^:private state
- (atom {:merged (load-all-sources)}))
-
-(defn reload-secrets! []
- (swap! state assoc :merged (load-all-sources))
- (:merged @state))
-
-(defn all-secrets []
- (:merged @state))
-
-;; ---------- lookup
-
-(defn- get-in* [m k-or-path]
- (if (vector? k-or-path) (get-in m k-or-path) (get m k-or-path)))
+;; ---------- Unified Secret Lookup
 
 (defn get-secret
- "Lookup order:
-  1) merged map (files + SECRET__* env)
-  2) direct ENV fallback by conventional name (e.g. BRAVE_API_KEY or BRAVE_API_KEY for [:brave :api-key])"
- [k-or-path]
- (or
-  (get-in* (:merged @state) k-or-path)
-  (System/getenv (env-name k-or-path))))
+  "Get a secret by key or path, checking all registered plugins in order.
+   
+   Examples:
+   (get-secret :api-key)          ; => \"value\"
+   (get-secret [:openai :api-key]) ; => \"sk-...\"
+   
+   Returns nil if no plugin can provide the secret."
+  [k-or-path]
+  (loop [ps @plugins]
+    (when (seq ps)
+      (let [plugin (first ps)
+            result ((:get-fn plugin) k-or-path)]
+        (if (some? result)
+          result
+          (recur (rest ps)))))))
+
+(defn get-secret-with-source
+  "Like get-secret, but returns a map with :value and :source (plugin name).
+   Returns nil if secret not found."
+  [k-or-path]
+  (loop [ps @plugins]
+    (when (seq ps)
+      (let [plugin (first ps)
+            result ((:get-fn plugin) k-or-path)]
+        (if (some? result)
+          {:value result :source (:name plugin)}
+          (recur (rest ps)))))))
+
+;; ---------- Bulk Operations
+
+(defn all-secrets
+  "Get all secrets from all plugins, merged together.
+   Later plugins override earlier ones on conflicts."
+  []
+  (let [all-fns (keep :all-fn @plugins)]
+    (apply files-plugin/deep-merge (map #(%) all-fns))))
+
+(defn reload-secrets!
+  "Reload secrets from all plugins that support reloading.
+   Returns a map of plugin-name => reloaded data."
+  []
+  (reduce
+   (fn [acc plugin]
+     (if-let [reload-fn (:reload-fn plugin)]
+       (assoc acc (:name plugin) (reload-fn))
+       acc))
+   {}
+   @plugins))
+
+;; ---------- Backwards Compatibility Utilities
+
+(defn write-encrypted-secrets!
+  "Write encrypted secrets to file (delegates to files plugin).
+   For backwards compatibility."
+  [path m]
+  (files-plugin/write-encrypted-secrets! path m))
