@@ -63,11 +63,25 @@
 
 (defn init-default-plugins!
   "Initialize default plugins (files and environment).
-   This is called automatically on namespace load."
+   This is called automatically on namespace load.
+   
+   If VAULT_ADDR is set, automatically registers the Vault plugin."
   []
   (reset! plugins [])
   (doseq [plugin default-plugins]
     (register-plugin! plugin))
+
+  ;; Auto-register Vault plugin if VAULT_ADDR is set
+  (when (System/getenv "VAULT_ADDR")
+    (try
+      (require 'secrets.plugins.vault)
+      (let [make-plugin (resolve 'secrets.plugins.vault/make-plugin)]
+        (when make-plugin
+          (register-plugin! (make-plugin))
+          (println "✓ Vault plugin auto-registered (VAULT_ADDR detected)")))
+      (catch Exception e
+        (println "⚠️  VAULT_ADDR is set but Vault plugin failed to load:" (.getMessage e)))))
+
   @plugins)
 
 ;; Initialize on load
